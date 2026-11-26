@@ -40,7 +40,9 @@ FLUX 3 Image Klein 和 Qwen-Image-2.1 已有开放权重，前者采用 FLUX Kom
 
 ## 4. 运行架构和优先级
 
-Rust 负责模型库、预检、调度、进度和产物交付。适配器运行固定版本的原生推理后端。首轮验证 `stable-diffusion.cpp`，因为它覆盖首批图像模型，并公开了 H3 的 GGUF、文本编码器及视频和音频 VAE 路径。推理在子进程执行，主进程持有运行记录。若后端无法通过有序参考或取消验收，再比较 Mold 的对应实现。 [stable-diffusion.cpp 模型目录](https://github.com/leejet/stable-diffusion.cpp#features) · [H3 执行说明](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/models/minimax_h3.md) · [Mold H3](https://utensils.io/mold/models/minimax-h3)
+v0.1 的 Rust 实施基线已确定。一个 Cargo 包发布一个 PlinthArc 程序，同一数据目录只由一个协调进程管理。首个 Pillar 直接调用固定构建的 `sd-cli` 子进程。常驻引擎按模型和设备单独验证后开放。[Rust 底层架构决议](ARCHITECTURE.md)
+
+选择 `stable-diffusion.cpp` 作为起点，是因为它覆盖首批图像模型，并公开了 H3 的 GGUF、文本编码器及视频和音频 VAE 路径。在同一设备依次比测 Mold 的 Rust/Candle 路径与 edge-dit.cpp 的 H3 CUDA 路径，按目标设备、质量、显存和可复现耗时确定默认配置。选型与验收细节见[依赖复用与性能方案](REUSE.md)。 [stable-diffusion.cpp 模型目录](https://github.com/leejet/stable-diffusion.cpp#features) · [H3 执行说明](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/models/minimax_h3.md) · [Mold H3](https://utensils.io/mold/models/minimax-h3)
 
 首机建议 Linux x64、NVIDIA CUDA、RTX 4090 24 GB 与 64 GB 主机内存。这个配置用于先建立可重复的基线。Windows CUDA、12 GB 档与 Apple Metal 必须各自有实机记录才进入支持名单。每个版本先在一台机器上验证冷启动、热复用、切模型和取消，再扩设备范围。
 
@@ -52,12 +54,20 @@ Rust 负责模型库、预检、调度、进度和产物交付。适配器运行
 | 3 · H3 交付 | 先做文生、首帧图生及原生音轨。加入至少一个 4 秒以上的可复现样例。对首尾帧、有序参考、错误组合、音画同步、OOM、取消和进程中断分别验收。只有通过对应样例才开放该输入模式。 |
 | 4 · 试用入口 | 将同一份能力描述接入本地任务表单，并用 GPUCanvas 实现结果工作区。用户可登记已有权重、使用预设、查看预检和历史产物。默认采用每设备一个活动推理任务，按实测调整。 |
 
-工作流组合、第三方生态和服务端调度在固定流水线的稳定性与可用性验证后评估。首版验收优先看三件事。相同权重会不会被多存一份，失败发生时能否说清位置和原因，任务完成后能否用当时的模型、参数和素材重现。
+图片闭环增加一项可独立验收的迁移能力。在 SDXL Base 原生操作通过后，导入一条七节点单图 API 工作流，编译成同一份原生请求。只在导入时解析一次。编辑器 JSON 与带元数据的 PNG 分别验收。超出支持范围的图指明阻塞节点，用户可另建原生工作流。第三方节点生态和通用图调度留到出现具体需求后评估。[工作流规范与验收](SPEC.md#7-原生工作流与-comfyui-导入)
 
 
 ## 5. 前端与仓库组织
 
 页面、交互、API 与验收细节见[前端实施方案](UI-PLAN.md)。
+
+### 从旧工作流或生成结果开始
+
+创作页的「打开工作流」进入新的可编辑草稿。成功导入时直接呈现模型、正负提示词、实际尺寸、采样器和种子。文件只有模型名时，先从共享模型库列出候选，用户确认后把摘要写进草稿。缺组件可以去模型库原地登记再返回。某个节点无法转换时显示其 ID、类型与原因。Arc 沿用现有 DOM 表单与结果区。ComfyUI 的 App Mode 可借鉴输入展示。SwarmUI 用户尝试把任意 Comfy 图还原成生成表单时，遇到了参数无法对应的问题。[ComfyUI App Mode](https://docs.comfy.org/interface/app-mode) · [SwarmUI 用户与维护者讨论](https://github.com/mcmonkeyprojects/SwarmUI/discussions/1170)
+
+结果卡提供「按原设置再跑」与「用这些设置」。「按原设置再跑」依照实际回执锁定种子、模型、配置和输入，重新预检后建立新任务。缺少原参考图时保留绑定并提示重连。「用这些设置」只打开草稿，改提示词、随机种子或配置后再生成。已完成的图片也可直接绑定为 H3 首帧。PNG 进入素材字段时直接当图片，只有选择复用设置时才读取工作流元数据。[InvokeAI 结果回用](https://invoke-ai.github.io/InvokeAI-7/users-guide/gallery/gallery-reference/) · [跨库素材引用限制](https://invoke-ai.github.io/InvokeAI-7/development/architecture/media-metadata/)
+
+验收时走完一次真实创作会话。首次导入并补齐模型，改种子连出三张图，从其中一张打开 H3，服务重连后继续查看结果。记录从打开文件到可编辑、提交到首个真实进度、提交到可用产物，以及取消后下一次提交到恢复出图的时间。已有热生成记录时才显示对应设备与规格的时间估计。[执行性能方案](REUSE.md)
 
 前端放在 PlinthArc 仓库的 `ui/`，是一个可独立开发和构建的 React、TypeScript 与 Vite 子项目。根目录保留 Rust 运行时和 CLI。首版的参数、预检、进度和结果会同时改动前后端，同仓可以在一次提交中更新契约、实现与验收样例。前端形成独立发布节奏、需要同时兼容多个后端版本时，再评估拆出 PlinthArc-UI。
 
@@ -66,9 +76,11 @@ PlinthArc/
   src/           Rust 运行时、CLI 和本机 HTTP 入口
   ui/            React + TypeScript + Vite
   docs/
+    ARCHITECTURE.md
     SPEC.md
     PLAN.md
     UI-PLAN.md
+    REUSE.md
 ```
 
 ### GPUCanvas 的使用范围
