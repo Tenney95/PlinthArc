@@ -1,6 +1,6 @@
 use anyhow::{Result, ensure};
 use clap::{Args, Parser, Subcommand};
-use plintharc::{model, sd_cli};
+use plintharc::{model, sd_cli, server};
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -21,6 +21,21 @@ enum Command {
     Verify { manifest: PathBuf },
     /// Generate and verify one PNG with a local sd-cli executable
     Generate(Generate),
+    /// Serve the Arc interface and its API over loopback
+    Serve(Serve),
+}
+
+#[derive(Args)]
+struct Serve {
+    #[arg(long, default_value_t = server::DEFAULT_PORT)]
+    port: u16,
+    #[arg(long, default_value = "ui/dist")]
+    ui_dir: PathBuf,
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Trusted sd-cli executable for this service
+    #[arg(long)]
+    engine: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -127,6 +142,24 @@ fn main() -> Result<()> {
                 seed: args.seed,
             },
         )?)?,
+        Command::Serve(args) => {
+            let local = server::LocalServer::bind(server::ServerConfig {
+                port: args.port,
+                ui_dir: args.ui_dir,
+                data_dir: match args.data_dir {
+                    Some(path) => path,
+                    None => server::default_data_dir()?,
+                },
+                engine: args
+                    .engine
+                    .or_else(|| std::env::var_os("PLINTHARC_ENGINE").map(PathBuf::from)),
+            })?;
+            println!("PlinthArc · {}", local.origin());
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(local.run())?;
+        }
     }
     Ok(())
 }

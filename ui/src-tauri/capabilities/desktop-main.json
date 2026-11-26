@@ -1,0 +1,8 @@
+{
+  "identifier": "desktop-main",
+  "description": "Allow the bundled Arc page in the main window to open a directory picker.",
+  "local": false,
+  "remote": { "urls": ["http://127.0.0.1:47361/*"] },
+  "webviews": ["main"],
+  "permissions": ["allow-choose-directory"]
+}

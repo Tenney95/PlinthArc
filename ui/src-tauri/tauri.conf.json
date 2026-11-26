@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PlinthArc",
+  "version": "0.1.0",
+  "identifier": "app.plintharc.desktop",
+  "build": {
+    "beforeDevCommand": { "script": "npm run build", "wait": true },
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "capabilities": ["desktop-main"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": { "../dist/": "arc/" },
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"]
+  }
+}

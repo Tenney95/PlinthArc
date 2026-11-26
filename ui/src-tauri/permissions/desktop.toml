@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-choose-directory"
+description = "Allow the directory picker for the active Arc origin."
+commands.allow = ["choose_directory"]

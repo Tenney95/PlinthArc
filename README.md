@@ -4,7 +4,7 @@ PlinthArc is a Rust project for running image, video, and audio generation model
 
 A versioned manifest describes each model package, and adapters handle model-specific loading and inference. Compatibility is tracked by model variant, operation, backend, and device.
 
-The first CLI pilot validates a local Z-Image-Turbo package, generates a PNG through `sd-cli`, and reports the model, device, seed, and timings. See the [CLI quickstart](docs/QUICKSTART.md).
+The first pilot validates local Z-Image-Turbo weights and generates PNGs through `sd-cli`. Arc provides the same workspace in a Tauri desktop window and a local browser, with configurable model and output directories. [Quickstart](docs/QUICKSTART.md)
 
 ## Design philosophy
 

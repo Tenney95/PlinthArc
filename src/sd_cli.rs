@@ -1,6 +1,6 @@
 use crate::model::{self, ModelSummary};
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufReader},
@@ -16,13 +16,33 @@ const SAMPLER: &str = "euler";
 const SCHEDULER: &str = "discrete";
 const RNG: &str = "cuda";
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Generation {
     pub prompt: String,
     pub width: u32,
     pub height: u32,
     pub steps: u32,
     pub seed: u32,
+}
+
+impl Generation {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.prompt.trim().is_empty() && !self.prompt.contains('\0'),
+            "prompt must be nonempty and contain no NUL characters"
+        );
+        for size in [self.width, self.height] {
+            ensure!(
+                (64..=2048).contains(&size) && size % 32 == 0,
+                "width and height must be multiples of 32 between 64 and 2048"
+            );
+        }
+        ensure!(
+            (1..=50).contains(&self.steps),
+            "steps must be between 1 and 50"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -56,20 +76,7 @@ pub fn generate(
     request: Generation,
 ) -> Result<Report> {
     let started = Instant::now();
-    ensure!(
-        !request.prompt.trim().is_empty() && !request.prompt.contains('\0'),
-        "prompt must be nonempty and contain no NUL characters"
-    );
-    for size in [request.width, request.height] {
-        ensure!(
-            (64..=2048).contains(&size) && size % 32 == 0,
-            "width and height must be multiples of 32 between 64 and 2048"
-        );
-    }
-    ensure!(
-        (1..=50).contains(&request.steps),
-        "steps must be between 1 and 50"
-    );
+    request.validate()?;
     ensure!(
         output
             .extension()
