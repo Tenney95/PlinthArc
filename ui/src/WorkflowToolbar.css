@@ -1,0 +1,95 @@
+.workflow-toolbar {
+  position: absolute;
+  z-index: 10;
+  top: 20%;
+  left: 12px;
+  width: 48px;
+}
+
+.workflow-toolbar__rail.ui-card,
+.workflow-toolbar__menu.ui-menu {
+  border: 1px solid transparent;
+  background: linear-gradient(var(--toolbar-surface), var(--toolbar-surface)) padding-box, var(--glass-bevel-border) border-box;
+}
+.workflow-toolbar__rail.ui-card {
+  --toolbar-surface: var(--floating-surface-bg);
+  align-items: center;
+  gap: 2px;
+  padding: 5px;
+  overflow: visible;
+  border-radius: 14px;
+  box-shadow: var(--glass-shadow-floating);
+  backdrop-filter: blur(var(--glass-blur-lg));
+}
+
+.workflow-toolbar__rail .ui-icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+}
+
+.workflow-toolbar__rail .ui-icon-btn[aria-pressed='true'],
+.workflow-toolbar__rail .ui-icon-btn[aria-expanded='true'] {
+  color: var(--brand-light);
+  background: var(--brand-alpha-12);
+}
+
+.workflow-toolbar__add { color: color-mix(in srgb, var(--brand-light) 78%, transparent); }
+.workflow-toolbar__rail .workflow-toolbar__delete:hover:where(:not(:disabled)) {
+  color: var(--danger-light);
+  background: var(--danger-bg);
+}
+
+.workflow-toolbar__separator {
+  width: 22px;
+  height: 1px;
+  margin-block: 2px;
+  background: var(--separator-color);
+}
+
+.workflow-toolbar__menu.ui-menu {
+  --toolbar-surface: var(--glass-bg);
+  position: absolute;
+  top: 0;
+  left: calc(100% + 14px);
+  width: min(260px, calc(100vw - 100px));
+  padding: 5px;
+  backdrop-filter: blur(var(--glass-blur-md));
+}
+
+.workflow-toolbar__menu-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 4px;
+  color: var(--theme-text-muted);
+  font-size: var(--ui-font-sm);
+  font-weight: 600;
+}
+.workflow-toolbar__menu-title::after { flex: 1; height: 1px; background: var(--separator-color); content: ''; }
+.workflow-toolbar__item.ui-menu__item {
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-font-input);
+}
+
+.workflow-toolbar__node-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--ui-radius);
+  color: var(--brand-light);
+  background: var(--brand-alpha-15);
+}
+
+.workflow-toolbar__node-icon--image {
+  color: var(--node-image-light);
+  background: var(--node-image-bg);
+}
+
+@media (max-height: 520px), (max-width: 720px) {
+  .workflow-toolbar { top: 12px; }
+}

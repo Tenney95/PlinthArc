@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
-  ArrowDownToLine, ArrowRight, CircleAlert, Clock3, Compass, Dice5, FolderOpen,
+  ArrowDownToLine, ArrowRight, CircleAlert, Clock3, Dice5, FolderOpen,
   Image as ImageIcon, Layers3, Plus, RefreshCw, Settings2, Sparkles, X,
 } from 'lucide-react'
 import { chooseDirectory, isDesktop } from './desktop'
-import { ResultCanvas, type CanvasItem } from './ResultCanvas'
+import { WorkflowCanvas, type WorkflowEndpoint } from './WorkflowCanvas'
+import { WorkflowToolbar, type WorkflowView } from './WorkflowToolbar'
+import { WorkspaceSelect } from './WorkspaceSelect'
+import {
+  asDraft, connect, initialImageId, loadWorkflow, makeNode, modelId, modelName, removeNode,
+  updateImage, workflowKey, type Draft, type ImageNode, type WorkflowKind, type WorkflowNode,
+} from './workflow'
 import './styles.css'
+import './WorkflowApp.css'
 
 type SettingsInput = { model_dir: string; output_dir: string; backend: string }
 type Settings = SettingsInput & { engine: string; model_ready?: boolean; engine_ready?: boolean }
@@ -17,15 +24,12 @@ type Run = {
   request?: Generation
   report?: { generation?: Omit<Generation, 'offload_to_cpu'>; offload_to_cpu?: boolean; engine_ms?: number } | null
 }
-type Draft = { prompt: string; width: string; height: string; steps: string; seed: string; offload_to_cpu: boolean }
-type View = 'create' | 'history'
-type Submission = { body: string; key: string }
+type Submission = { body: string; key: string; nodeId: string }
 
 const API = '/api/v1'
-const draftKey = 'plintharc-draft'
 const submissionKey = 'plintharc-submission'
-const defaultDraft: Draft = { prompt: '', width: '512', height: '512', steps: '8', seed: '42', offload_to_cpu: false }
 const defaultSettings: Settings = { model_dir: '', output_dir: '', engine: '', backend: 'cpu' }
+const modelOptions = [{ value: modelId, label: modelName }]
 const statuses: Record<Run['status'], string> = {
   running: '生成中', succeeded: '已完成', failed: '失败', interrupted: '已中断',
 }
@@ -50,16 +54,10 @@ function writeLocal(key: string, value: unknown) {
   }
 }
 
-function initialDraft(): Draft {
-  const saved = readLocal<Partial<Draft>>(draftKey)
-  return {
-    prompt: typeof saved?.prompt === 'string' ? saved.prompt : defaultDraft.prompt,
-    width: typeof saved?.width === 'string' ? saved.width : defaultDraft.width,
-    height: typeof saved?.height === 'string' ? saved.height : defaultDraft.height,
-    steps: typeof saved?.steps === 'string' ? saved.steps : defaultDraft.steps,
-    seed: typeof saved?.seed === 'string' ? saved.seed : defaultDraft.seed,
-    offload_to_cpu: saved?.offload_to_cpu === true,
-  }
+function initialSubmission(): Submission | null {
+  const saved = readLocal<Partial<Submission>>(submissionKey)
+  return typeof saved?.body === 'string' && typeof saved.key === 'string'
+    ? { body: saved.body, key: saved.key, nodeId: saved.nodeId ?? initialImageId } : null
 }
 
 class RequestError extends Error {
@@ -164,10 +162,10 @@ function SettingsDialog({ initial, onClose, onSaved }: { initial: Settings; onCl
       {([['model_dir', '模型目录', '包含 model.json 的绝对路径'], ['output_dir', '输出目录', '用于保存图片的绝对路径']] as const).map(([key, label, placeholder]) =>
         <div className="field ui-field" key={key}>
           <label className="ui-label" htmlFor={key}>{label}</label>
-          <div className="path-field">
+          <div className={desktop ? 'path-field ui-input-group' : 'path-field'}>
             <input className="ui-input" id={key} placeholder={placeholder} value={draft[key]} required spellCheck={false}
               onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} />
-            {desktop && <button type="button" className="quiet-button ui-btn ui-btn--secondary" onClick={() => void browse(key)} disabled={saving || Boolean(selecting)}>
+            {desktop && <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={() => void browse(key)} disabled={saving || Boolean(selecting)}>
               {selecting === key ? <span className="ui-spinner" aria-hidden="true" /> : <FolderOpen size={15} />}选择
             </button>}
           </div>
@@ -223,9 +221,71 @@ function SelectedRun({ run, onReuse }: { run: Run; onReuse(): void }) {
   </section>
 }
 
+const numberFields = [
+  ['width', '宽度', 64, 2048, 32], ['height', '高度', 64, 2048, 32],
+  ['steps', '步数', 1, 50, 1], ['seed', '种子', 0, 4294967295, 1],
+] as const
+
+function ImageNodePanel({
+  node, run, canSubmit, confirming, submitting, issue, onDraft, onSubmit, onResult,
+}: {
+  node: ImageNode; run?: Run; canSubmit: boolean; confirming: boolean; submitting: boolean; issue: string
+  onDraft(draft: Draft): void; onSubmit(event: FormEvent<HTMLFormElement>): void; onResult(run: Run): void
+}) {
+  const { draft } = node
+  const working = submitting || run?.status === 'running'
+  return <article className="workflow-node-content workflow-image-node">
+    <div className="workflow-node__heading ui-card__header" data-workflow-drag-handle>
+      <ImageIcon size={17} aria-hidden="true" />
+      <h2 className="ui-card__title">图像生成</h2>
+      {run && <Status value={run.status} />}
+    </div>
+    <div className="workflow-node__scroll" data-workflow-interactive>
+      <form className="workflow-node__form" onSubmit={onSubmit}>
+        <div className="ui-field">
+          <label className="ui-label" htmlFor={`${node.id}-prompt`}>提示词</label>
+          <textarea className="ui-textarea" id={`${node.id}-prompt`} placeholder="描述你想生成的画面"
+            aria-label="提示词" value={draft.prompt} required={!confirming}
+            onChange={(event) => onDraft({ ...draft, prompt: event.target.value })} />
+        </div>
+        <div className="field-grid">
+          {numberFields.map(([key, label, min, max, step]) =>
+            <div className="ui-field" key={key}>
+              <label className="ui-label" htmlFor={`${node.id}-${key}`}>{label}</label>
+              <div className={key === 'seed' ? 'number-field ui-input-group' : 'number-field'}>
+                <input className="ui-input" id={`${node.id}-${key}`} type="number" required={!confirming}
+                  min={min} max={max} step={step} value={draft[key]}
+                  onChange={(event) => onDraft({ ...draft, [key]: event.target.value })} />
+                {key === 'seed' && <button type="button" className="ui-icon-btn ui-icon-btn--sm ui-icon-btn--ghost"
+                  title="随机种子" aria-label="随机种子"
+                  onClick={() => onDraft({ ...draft, seed: String(crypto.getRandomValues(new Uint32Array(1))[0]) })}><Dice5 size={15} /></button>}
+              </div>
+            </div>)}
+        </div>
+        <div className="toggle-label ui-label">
+          <span id={`${node.id}-offload-label`}>权重卸载到 CPU</span>
+          <button type="button" className="ui-switch" role="switch" aria-labelledby={`${node.id}-offload-label`}
+            aria-checked={draft.offload_to_cpu} onClick={() => onDraft({ ...draft, offload_to_cpu: !draft.offload_to_cpu })} />
+        </div>
+        <button className="ui-btn ui-btn--primary ui-btn--block" type="submit" formNoValidate={confirming} disabled={!canSubmit}>
+          {working ? <span className="ui-spinner" aria-hidden="true" /> : <Sparkles size={15} />}
+          {submitting ? '提交中' : confirming ? '确认上次提交' : working ? '生成中' : '生成图片'}
+        </button>
+        {issue && <Notice tone="warning">{issue}</Notice>}
+      </form>
+      {run?.status === 'succeeded' && <button type="button" className="workflow-node__result ui-btn ui-btn--secondary"
+        onClick={() => onResult(run)} aria-label="查看生成结果">
+        <img src={runImage(run)} alt="" loading="lazy" decoding="async" draggable={false} />
+        <span>查看生成结果</span><ArrowRight size={14} aria-hidden="true" />
+      </button>}
+      {run?.error && <div className="workflow-node__error"><Notice>{run.error}</Notice></div>}
+    </div>
+  </article>
+}
+
 export default function App() {
-  const [view, setView] = useState<View>('create')
-  const [draft, setDraft] = useState(initialDraft)
+  const [view, setView] = useState<WorkflowView>('create')
+  const [graph, setGraph] = useState(() => loadWorkflow(readLocal(workflowKey), readLocal('plintharc-draft')))
   const [settings, setSettings] = useState<Settings | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsError, setSettingsError] = useState('')
@@ -234,11 +294,13 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false)
   const [historyError, setHistoryError] = useState('')
   const [pollError, setPollError] = useState('')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [submitting, setSubmitting] = useState(false)
-  const [submitError, setSubmitError] = useState('')
-  const [pending, setPending] = useState(() => readLocal<Submission>(submissionKey))
-  const promptInput = useRef<HTMLTextAreaElement>(null)
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const [submittingNode, setSubmittingNode] = useState<string | null>(null)
+  const submissionLock = useRef(false)
+  const [submitError, setSubmitError] = useState<{ nodeId: string; message: string } | null>(null)
+  const [pending, setPending] = useState(initialSubmission)
+  const viewportCenter = useRef({ x: 445, y: 290 })
 
   const loadSettings = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -263,7 +325,7 @@ export default function App() {
         }))
         setHistoryError('')
         setHistoryReady(true)
-        setSelectedId((current) => current && next.some((run) => run.id === current) ? current : next[0]?.id ?? null)
+        setSelectedRunId((current) => current && next.some((run) => run.id === current) ? current : next[0]?.id ?? null)
       }
     } catch (error) {
       if (!signal?.aborted) {
@@ -282,7 +344,7 @@ export default function App() {
     return () => controller.abort()
   }, [loadSettings, loadRuns])
 
-  useEffect(() => { writeLocal(draftKey, draft) }, [draft])
+  useEffect(() => { writeLocal(workflowKey, graph) }, [graph])
 
   const runningIds = runs.filter((run) => run.status === 'running').map((run) => run.id).join(',')
   useEffect(() => {
@@ -304,40 +366,41 @@ export default function App() {
     return () => { controller.abort(); clearTimeout(timer) }
   }, [runningIds])
 
-  const selected = runs.find((run) => run.id === selectedId)
+  const busy = Boolean(submittingNode || runningIds)
   const modelReady = Boolean(settings?.model_dir) && settings?.model_ready !== false
   const engineReady = Boolean(settings?.engine) && settings?.engine_ready !== false
   const configured = modelReady && engineReady && Boolean(settings?.output_dir && settings.backend)
-  const busy = submitting || Boolean(runningIds)
-  const generation: Generation = {
-    prompt: draft.prompt, width: Number(draft.width), height: Number(draft.height),
-    steps: Number(draft.steps), seed: Number(draft.seed), offload_to_cpu: draft.offload_to_cpu,
-  }
-  const body = JSON.stringify(generation)
-  const confirming = pending?.body === body
-  const canSubmit = !settingsError && historyReady && !refreshing && !submitting && Boolean(draft.prompt.trim())
-    && (confirming || (configured && !runningIds))
   const connection = settingsError || historyError ? 'offline' : settings && historyReady ? 'online' : 'connecting'
-  const items: CanvasItem[] = runs.map((run) => ({
-    id: run.id,
-    title: runTitle(run),
-    status: statuses[run.status],
-    detail: runSize(run),
-    imageUrl: run.status === 'succeeded' ? runImage(run) : undefined,
-  }))
+  const savedRun = runs.find((run) => run.id === selectedRunId)
+  const connectionMessage = settingsError || historyError || (runningIds && pollError)
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
+  function hasModel(node: ImageNode) {
+    return graph.edges.some((edge) => edge.target.nodeId === node.id)
+  }
+
+  function allowed(node: ImageNode) {
+    if (settingsError || !historyReady || refreshing || submittingNode || !configured || !hasModel(node)) return false
+    if (pending) return pending.nodeId === node.id
+    return !runningIds && Boolean(node.draft.prompt.trim())
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>, node: ImageNode) {
     event.preventDefault()
-    if (!canSubmit) return
-    const key = confirming && pending.key ? pending.key : crypto.randomUUID()
-    const submission = { body, key }
+    if (!allowed(node) || submissionLock.current) return
+    const draft = node.draft
+    const generation: Generation = {
+      prompt: draft.prompt, width: Number(draft.width), height: Number(draft.height),
+      steps: Number(draft.steps), seed: Number(draft.seed), offload_to_cpu: draft.offload_to_cpu,
+    }
+    const submission = pending ?? { body: JSON.stringify(generation), key: crypto.randomUUID(), nodeId: node.id }
+    submissionLock.current = true
     setPending(submission)
     writeLocal(submissionKey, submission)
-    setSubmitting(true)
-    setSubmitError('')
+    setSubmittingNode(node.id)
+    setSubmitError(null)
     try {
       const run = await request<Run>('/runs', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body,
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': submission.key }, body: submission.body,
       })
       setPending(null)
       writeLocal(submissionKey, null)
@@ -346,118 +409,121 @@ export default function App() {
         const latest = known && known.status !== 'running' && run.status === 'running' ? known : run
         return [latest, ...current.filter((item) => item.id !== run.id)]
       })
-      setSelectedId(run.id)
+      setGraph((current) => updateImage(current, node.id, { runId: run.id }))
+      setSelectedRunId(run.id)
     } catch (error) {
       if (error instanceof RequestError && error.status >= 400 && error.status < 500 && error.status !== 408) {
         setPending(null)
         writeLocal(submissionKey, null)
-        setSubmitError(errorText(error))
+        setSubmitError({ nodeId: node.id, message: errorText(error) })
       } else {
-        setSubmitError('未收到提交回执。再次确认会沿用同一次提交。')
+        setSubmitError({ nodeId: node.id, message: '未收到提交回执。再次确认会沿用同一次提交。' })
       }
       await loadRuns()
     } finally {
-      setSubmitting(false)
+      submissionLock.current = false
+      setSubmittingNode(null)
     }
+  }
+
+  function addNode(kind: WorkflowKind, draft?: Draft) {
+    const { x, y } = viewportCenter.current
+    const offset = ((graph.nodes.length % 4) - 1) * 26
+    const node = makeNode(kind, crypto.randomUUID(), { x: x - 130 + offset, y: y - 90 + offset }, draft)
+    setGraph((current) => ({ ...current, nodes: [...current.nodes, node] }))
+    setSelectedNodeId(node.id)
+    setView('create')
   }
 
   function reuse(run: Run) {
     const generation = run.report?.generation ?? run.request
     if (!generation) return
-    setDraft({
-      prompt: generation.prompt, width: String(generation.width), height: String(generation.height),
+    const draft = asDraft({
+      ...generation, width: String(generation.width), height: String(generation.height),
       steps: String(generation.steps), seed: String(generation.seed),
-      offload_to_cpu: run.report?.offload_to_cpu ?? run.request?.offload_to_cpu ?? false,
+      offload_to_cpu: run.report?.offload_to_cpu ?? run.request?.offload_to_cpu,
     })
-    setSubmitError('')
-    setView('create')
+    const image = graph.nodes.find((node) => node.kind === 'image' && node.id === selectedNodeId)
+      ?? graph.nodes.find((node) => node.kind === 'image')
+    if (image) {
+      setGraph((current) => updateImage(current, image.id, { draft }))
+      setSelectedNodeId(image.id)
+      setView('create')
+    } else addNode('image', draft)
+    setSubmitError(null)
   }
 
-  function retryConnection() {
-    void loadSettings()
-    void loadRuns()
+  const onViewportChange = useCallback((center: { x: number; y: number }) => {
+    viewportCenter.current = center
+  }, [])
+
+  function onConnect(source: WorkflowEndpoint, target: WorkflowEndpoint) {
+    setGraph((current) => connect(current, source, target))
   }
 
-  return <div className="app-shell">
-    <header className="app-bar">
-      <div className="wordmark"><span className="brand-mark"><Layers3 size={17} /></span><h1>PlinthArc</h1></div>
-      <nav className="view-switch ui-segmented" aria-label="工作区">
-        <button className={`ui-segmented__item${view === 'create' ? ' is-active' : ''}`} type="button" aria-pressed={view === 'create'} onClick={() => setView('create')}><Compass size={15} />创作</button>
-        <button className={`ui-segmented__item${view === 'history' ? ' is-active' : ''}`} type="button" aria-pressed={view === 'history'} onClick={() => setView('history')}><Clock3 size={15} />历史</button>
-      </nav>
-      <div className="app-actions">
-        <span className={`connection ui-badge ui-badge--${connection === 'online' ? 'success' : connection === 'offline' ? 'danger' : 'outline'}`} data-state={connection}><i className="ui-badge__dot" />{connection === 'online' ? '本地服务' : connection === 'offline' ? '未连接' : '连接中'}</span>
-        <button className="icon-button ui-icon-btn" type="button" title="打开设置" aria-label="打开设置" onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></button>
+  function deleteSelected() {
+    if (!selectedNodeId || pending?.nodeId === selectedNodeId || submittingNode === selectedNodeId) return
+    setGraph((current) => removeNode(current, selectedNodeId))
+    setSelectedNodeId(null)
+  }
+
+  function renderNode(node: WorkflowNode) {
+    if (node.kind === 'model') return <article className="workflow-node-content workflow-model-node">
+      <div className="workflow-node__heading ui-card__header" data-workflow-drag-handle>
+        <Layers3 size={17} aria-hidden="true" /><h2 className="ui-card__title">模型</h2>
       </div>
+      <div className="workflow-model-node__body">
+        <div className="ui-field">
+          <label className="ui-label" htmlFor={`model-${node.id}`}>选择模型</label>
+          <WorkspaceSelect id={`model-${node.id}`} label="选择模型" value={node.model} options={modelOptions} />
+        </div>
+        {modelReady
+          ? <span className="ui-badge ui-badge--success"><i className="ui-badge__dot" />模型已就绪</span>
+          : <button type="button" className="ui-btn ui-btn--link" onClick={() => setSettingsOpen(true)}>设置模型目录</button>}
+      </div>
+    </article>
+    const run = runs.find((item) => item.id === node.runId)
+    const issue = !hasModel(node) ? '将模型节点的输出连到此节点。'
+      : settings && !configured ? '请检查模型、引擎和产物目录设置。'
+        : submitError?.nodeId === node.id ? submitError.message : ''
+    return <ImageNodePanel node={node} run={run} canSubmit={allowed(node)} issue={issue}
+      submitting={submittingNode === node.id} confirming={pending?.nodeId === node.id}
+      onDraft={(draft) => setGraph((current) => updateImage(current, node.id, { draft }))}
+      onSubmit={(event) => void submit(event, node)}
+      onResult={(result) => { setSelectedRunId(result.id); setView('history') }} />
+  }
+
+  return <main className="workflow-app">
+    <WorkflowCanvas
+      nodes={graph.nodes} edges={graph.edges} selectedId={selectedNodeId} renderNode={renderNode}
+      busy={busy} onSelect={setSelectedNodeId} onViewportChange={onViewportChange}
+      onMove={(id, point) => setGraph((current) => ({ ...current, nodes: current.nodes.map((node) => node.id === id ? { ...node, ...point } : node) }))}
+      onConnect={onConnect}
+      onRemoveEdge={(id) => setGraph((current) => ({ ...current, edges: current.edges.filter((edge) => edge.id !== id) }))}
+      empty={<div className="ui-empty"><p className="ui-empty__desc">从左侧添加模型或图像生成节点。</p></div>}
+    />
+    <header className="workflow-brand ui-card">
+      <div className="wordmark"><span className="brand-mark"><Layers3 size={17} aria-hidden="true" /></span><h1>PlinthArc</h1></div>
+      <span className={`connection ui-badge ui-badge--${connection === 'online' ? 'success' : connection === 'offline' ? 'danger' : 'outline'}`} data-state={connection}>
+        <i className="ui-badge__dot" />{connection === 'online' ? '本地服务' : connection === 'offline' ? '未连接' : '连接中'}
+      </span>
     </header>
-    <main className="workspace">
-      <section className="canvas-panel" aria-label="结果画布">
-        <div className="canvas-heading ui-card"><ImageIcon size={15} />结果画布</div>
-        <ResultCanvas items={items} selectedId={selectedId} onSelect={setSelectedId} busy={busy} empty={
-          <div className="canvas-empty ui-empty">
-            <ImageIcon className="ui-empty__icon" size={25} strokeWidth={1.55} />
-            <h2 className="ui-empty__title">{busy ? '正在生成图片' : '开始创作'}</h2>
-            <p className="ui-empty__desc">{busy ? '完成后，图片会出现在画布中。' : configured ? '输入提示词，生成你的第一张图片。' : '设置模型和输出目录后即可生成图片。'}</p>
-            {!busy && <button type="button" className="quiet-button ui-btn ui-btn--secondary" onClick={() => {
-              if (!configured) setSettingsOpen(true)
-              else { setView('create'); requestAnimationFrame(() => promptInput.current?.focus()) }
-            }}>{configured ? <Plus size={15} /> : <Settings2 size={15} />}{configured ? '输入提示词' : '打开设置'}</button>}
-          </div>
-        } />
-      </section>
-      <aside className="side-panel" data-view={view} aria-label={view === 'create' ? '图像生成' : '运行历史'}>
-        {view === 'create' ? <>
-          <div className="panel-heading ui-card__header"><Sparkles size={17} /><h2 className="ui-card__title">图像生成</h2></div>
-          <form className="generation-form" onSubmit={submit} onKeyDown={(event) => {
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
-              event.preventDefault()
-              if (canSubmit) event.currentTarget.requestSubmit()
-            }
-          }}>
-            <div className="model-field ui-card">
-              <span className="model-icon"><ImageIcon size={17} /></span>
-              <span><strong className="ui-card__title">Z-Image-Turbo</strong><small className="ui-card__desc">{settings?.backend ? `计算设备 · ${settings.backend}` : '本地图像模型'}</small></span>
-              {modelReady && <span className="model-ready ui-badge ui-badge--success" title="模型已就绪"><i className="ui-badge__dot" />就绪</span>}
-            </div>
-            <div className="field prompt-field ui-field"><label className="ui-label" htmlFor="prompt">提示词</label>
-              <textarea className="ui-textarea" ref={promptInput} id="prompt" rows={6} placeholder="描述画面中的主体、构图和风格…" value={draft.prompt}
-                onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} required />
-            </div>
-            <div className="field-grid">
-              {([['width', '宽度', 64, 2048, 32], ['height', '高度', 64, 2048, 32], ['steps', '步数', 1, 50, 1], ['seed', '种子', 0, 4294967295, 1]] as const).map(([key, label, min, max, step]) =>
-                <div className="field ui-field" key={key}>
-                  <label className="ui-label" htmlFor={key}>{label}</label>
-                  <div className={key === 'seed' ? 'number-field ui-input-group' : 'number-field'}><input className="ui-input" id={key} type="number" required min={min} max={max} step={step} value={draft[key]}
-                    onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} />
-                    {key === 'seed' && <button type="button" className="icon-button ui-icon-btn ui-icon-btn--sm ui-icon-btn--ghost" title="随机种子" aria-label="随机种子"
-                      onClick={() => setDraft({ ...draft, seed: String(crypto.getRandomValues(new Uint32Array(1))[0]) })}><Dice5 size={16} /></button>}
-                  </div>
-                </div>)}
-            </div>
-            <label className="toggle-label ui-label" htmlFor="offload-switch"><span id="offload-label">权重卸载到 CPU</span>
-              <button type="button" id="offload-switch" className="ui-switch" role="switch" aria-labelledby="offload-label" aria-checked={draft.offload_to_cpu}
-                onClick={() => setDraft({ ...draft, offload_to_cpu: !draft.offload_to_cpu })} />
-            </label>
-            {settings && !configured && <Notice tone="warning">
-              {!engineReady ? '推理引擎尚未就绪。' : !modelReady ? '模型目录缺少可用的 model.json。' : '请设置计算设备与输出目录。'}
-              <button className="link-button ui-btn ui-btn--link" type="button" onClick={() => setSettingsOpen(true)}>查看设置</button>
-            </Notice>}
-            {submitError && <Notice>{submitError}</Notice>}
-            <button className="primary-button generate-button ui-btn ui-btn--primary ui-btn--lg ui-btn--block" type="submit" disabled={!canSubmit}>
-              {busy ? <span className="ui-spinner" aria-hidden="true" /> : <Sparkles size={17} />}
-              {submitting ? '提交中' : confirming ? '确认上次提交' : runningIds ? '生成中' : '生成图片'}
-            </button>
-          </form>
-        </> : <RunList runs={runs} selectedId={selectedId} onSelect={setSelectedId} refreshing={refreshing || submitting} onRefresh={() => void loadRuns()} />}
-        {(settingsError || historyError) && <div className="panel-notice"><Notice>{settingsError || historyError}
-          <button type="button" className="link-button ui-btn ui-btn--link" onClick={retryConnection} disabled={refreshing}>重试连接</button>
-        </Notice></div>}
-        {Boolean(runningIds) && pollError && <div className="panel-notice"><Notice>{pollError}</Notice></div>}
-        {selected && <SelectedRun run={selected} onReuse={() => reuse(selected)} />}
-      </aside>
-    </main>
-    {settingsOpen && <SettingsDialog initial={settings ?? defaultSettings} onClose={() => setSettingsOpen(false)} onSaved={(saved) => {
-      setSettings(saved); setSettingsError(''); setSubmitError('')
-    }} />}
-  </div>
+    <WorkflowToolbar view={view} onChangeView={setView} onOpenSettings={() => setSettingsOpen(true)}
+      onAddNode={(kind) => addNode(kind)} onDeleteSelected={deleteSelected}
+      canDelete={Boolean(selectedNodeId && pending?.nodeId !== selectedNodeId && submittingNode !== selectedNodeId)} />
+    {view === 'history' && <aside className="workflow-history side-panel ui-card" data-view="history" aria-label="运行历史">
+      <button className="workflow-history__close ui-icon-btn ui-icon-btn--sm" type="button"
+        onClick={() => setView('create')} aria-label="关闭历史"><X size={16} /></button>
+      <RunList runs={runs} selectedId={selectedRunId} onSelect={setSelectedRunId} refreshing={refreshing}
+        onRefresh={() => void loadRuns()} />
+      {savedRun?.status === 'succeeded' && <img className="workflow-history__preview" src={runImage(savedRun)} alt="生成结果" loading="lazy" />}
+      {savedRun && <SelectedRun run={savedRun} onReuse={() => reuse(savedRun)} />}
+    </aside>}
+    {connectionMessage && <div className="workflow-connection-notice"><Notice>{connectionMessage}
+      <button type="button" className="link-button ui-btn ui-btn--link" disabled={refreshing}
+        onClick={() => { void loadSettings(); void loadRuns() }}>重试连接</button>
+    </Notice></div>}
+    {settingsOpen && <SettingsDialog initial={settings ?? defaultSettings} onClose={() => setSettingsOpen(false)}
+      onSaved={(saved) => { setSettings(saved); setSettingsError(''); setSubmitError(null) }} />}
+  </main>
 }
